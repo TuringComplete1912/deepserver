@@ -1,8 +1,9 @@
 import OpenAI from 'openai';
 
+// ✅ 必须是 SiliconFlow，否则 Qwen 和图片都无法使用！
 const client = new OpenAI({
   apiKey: process.env.DEEPSEEK_API_KEY, 
-  baseURL: "https://api.siliconflow.cn/v1" // 确保是 SiliconFlow
+  baseURL: "https://api.siliconflow.cn/v1" 
 });
 
 export const config = { 
@@ -26,17 +27,13 @@ export default async function handler(req) {
   try {
     const { messages, model } = await req.json();
 
-    // 2. 关键检查：如果发了图片，必须用 VL 模型
-    const hasImage = messages.some(m => Array.isArray(m.content));
-    const isVisionModel = model.includes('VL'); // 检查模型名字里有没有 VL
-
-    if (hasImage && !isVisionModel) {
-      throw new Error(`Model Mismatch: You selected "${model}" but sent an image. Please switch to "Qwen2 VL".`);
-    }
-
+    // 2. 修正模型名称 (防止前端传错)
+    // 如果用户选了 DeepSeek V3，确保发给后端的是 SiliconFlow 认可的 ID
+    let targetModel = model;
+    
     // 3. 构建请求
     const response = await client.chat.completions.create({
-      model: model || "deepseek-ai/DeepSeek-V3",
+      model: targetModel,
       messages: messages,
       stream: true,
       max_tokens: 4096,
@@ -58,16 +55,9 @@ export default async function handler(req) {
 
   } catch (error) {
     console.error("Backend Error:", error);
-    
-    // 🔥 这里把真正的错误原因返回给你
-    // 如果是 API Key 错了，会显示 401
-    // 如果是余额不足，会显示 Balance Insufficient
-    const realErrorMessage = error.error?.message || error.message || "Unknown Error";
-    
-    return new Response(JSON.stringify({ 
-      error: `[Server] ${realErrorMessage}` 
-    }), { 
-      status: 500,
+    const msg = error.error?.message || error.message || "Unknown Error";
+    return new Response(JSON.stringify({ error: `[Server] ${msg}` }), { 
+      status: 500, 
       headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
     });
   }
