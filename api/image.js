@@ -1,18 +1,17 @@
 import OpenAI from 'openai';
 
-// ✅ 必须使用 SiliconFlow 的配置
 const client = new OpenAI({
-  apiKey: process.env.DEEPSEEK_API_KEY, // 复用你已经配好的 SiliconFlow Key
+  apiKey: process.env.DEEPSEEK_API_KEY, 
   baseURL: "https://api.siliconflow.cn/v1"
 });
 
 export const config = {
   runtime: 'edge',
-  maxDuration: 60 // 生图比较慢，延长时间防止超时
+  maxDuration: 60
 };
 
 export default async function handler(req) {
-  // 1. 跨域处理 (CORS)
+  // 1. 跨域处理
   if (req.method === 'OPTIONS') {
     return new Response(null, {
       status: 200,
@@ -24,56 +23,50 @@ export default async function handler(req) {
     });
   }
 
-  if (req.method !== 'POST') {
-    return new Response('Method Not Allowed', { status: 405 });
-  }
-
   try {
     const { prompt } = await req.json();
+    if (!prompt) throw new Error("Prompt is required");
 
-    if (!prompt) {
-      throw new Error("Prompt is required");
-    }
+    console.log(`[Image] Generating: ${prompt}`);
 
-    console.log(`[Image Gen] Prompt: ${prompt}`);
-
-    // 2. 调用 SiliconFlow 的 FLUX.1 模型
-    // FLUX 是目前最快、效果最好的开源生图模型之一
+    // 2. 请求 SiliconFlow (不强制要求 b64_json，让它自己决定)
     const response = await client.images.generate({
       model: "black-forest-labs/FLUX.1-schnell", 
       prompt: prompt,
       n: 1,
-      size: "1024x1024", // 标准尺寸
-      response_format: "b64_json" // 必须强制要 Base64，否则可能返回 URL 导致跨域问题
+      size: "1024x1024", 
     });
 
-    // 3. 检查结果
-    const imageData = response.data[0].b64_json;
-    if (!imageData) {
-      throw new Error("API returned empty image data");
+    console.log("Raw Response:", JSON.stringify(response));
+
+    // 3. 智能解析 (既兼容 URL 也兼容 Base64)
+    const dataObj = response.data[0];
+    let finalImageUrl = "";
+
+    if (dataObj.url) {
+      // 如果返回的是网址
+      finalImageUrl = dataObj.url;
+    } else if (dataObj.b64_json) {
+      // 如果返回的是 Base64
+      finalImageUrl = `data:image/png;base64,${dataObj.b64_json}`;
+    } else {
+      throw new Error("No image URL or Base64 found in response");
     }
 
-    // 4. 返回前端
+    // 4. 返回成功
     return new Response(JSON.stringify({ 
-      image: `data:image/png;base64,${imageData}`,
+      image: finalImageUrl,
       status: 'success'
     }), {
-      headers: { 
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*'
-      }
+      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
     });
 
   } catch (error) {
-    console.error("Image Gen Error:", error);
-    // 返回具体的错误原因
+    console.error("Image Error:", error);
     const msg = error.error?.message || error.message || "Unknown Error";
     return new Response(JSON.stringify({ error: `[Server] ${msg}` }), { 
       status: 500,
-      headers: { 
-        'Content-Type': 'application/json', 
-        'Access-Control-Allow-Origin': '*' 
-      }
+      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
     });
   }
 }
