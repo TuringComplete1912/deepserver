@@ -1,17 +1,17 @@
 import OpenAI from 'openai';
 
 const client = new OpenAI({
-  apiKey: process.env.DEEPSEEK_API_KEY, // 确保 Vercel 里填的是 SiliconFlow 的 Key
-  baseURL: "https://api.siliconflow.cn/v1" 
+  apiKey: process.env.DEEPSEEK_API_KEY, 
+  baseURL: "https://api.siliconflow.cn/v1" // 确保是 SiliconFlow
 });
 
 export const config = { 
   runtime: 'edge',
-  maxDuration: 60 // 延长超时时间，防止传图片超时
+  maxDuration: 60 
 };
 
 export default async function handler(req) {
-  // 1. 处理 OPTIONS 请求 (跨域预检，防止浏览器报 CORS 错误)
+  // 1. 跨域处理
   if (req.method === 'OPTIONS') {
     return new Response(null, {
       status: 200,
@@ -24,64 +24,49 @@ export default async function handler(req) {
   }
 
   try {
-    const { messages, model, type, length } = await req.json();
+    const { messages, model } = await req.json();
 
-    // 2. 智能构建 Prompt
-    // 注意：Qwen-VL 视觉模型有时不喜欢 System Prompt，所以如果是图片模式，我们简化消息结构
-    let finalMessages = [];
-
-    // 检查是否有图片 (通过检查 content 是否为数组)
+    // 2. 关键检查：如果发了图片，必须用 VL 模型
     const hasImage = messages.some(m => Array.isArray(m.content));
+    const isVisionModel = model.includes('VL'); // 检查模型名字里有没有 VL
 
-    if (!hasImage) {
-      // 纯文本模式：加上 System Prompt 设定人设
-      let systemPrompt = "You are a helpful assistant.";
-      if (type === 'ask') systemPrompt = "You are a professional translator. Output only the result.";
-      if (type === 'write') systemPrompt = `You are a professional writer. Length: ${length || 'any'}.`;
-      
-      finalMessages = [
-        { role: "system", content: systemPrompt },
-        ...messages
-      ];
-    } else {
-      // 📷 图片模式：直接发送用户消息，减少干扰，提高成功率
-      finalMessages = [...messages];
+    if (hasImage && !isVisionModel) {
+      throw new Error(`Model Mismatch: You selected "${model}" but sent an image. Please switch to "Qwen2 VL".`);
     }
 
-    // 3. 发送请求
+    // 3. 构建请求
     const response = await client.chat.completions.create({
       model: model || "deepseek-ai/DeepSeek-V3",
-      messages: finalMessages,
+      messages: messages,
       stream: true,
-      max_tokens: 4096, // 显式限制，防止模型输出无限长
+      max_tokens: 4096,
     });
 
-    // 4. 流式返回
     const stream = new ReadableStream({
       async start(controller) {
         for await (const chunk of response) {
           const content = chunk.choices[0]?.delta?.content || "";
-          if (content) {
-            controller.enqueue(new TextEncoder().encode(content));
-          }
+          if (content) controller.enqueue(new TextEncoder().encode(content));
         }
         controller.close();
       },
     });
 
     return new Response(stream, {
-      headers: { 
-        'Content-Type': 'text/event-stream',
-        'Access-Control-Allow-Origin': '*' // 允许跨域
-      },
+      headers: { 'Content-Type': 'text/event-stream', 'Access-Control-Allow-Origin': '*' },
     });
 
   } catch (error) {
-    console.error("Backend Error Details:", error); // 这行字会出现在 Vercel Logs 里
+    console.error("Backend Error:", error);
     
-    // 返回具体的错误信息给前端，而不是笼统的 500
-    const errorMessage = error.error?.message || error.message || "Unknown Server Error";
-    return new Response(JSON.stringify({ error: errorMessage }), { 
+    // 🔥 这里把真正的错误原因返回给你
+    // 如果是 API Key 错了，会显示 401
+    // 如果是余额不足，会显示 Balance Insufficient
+    const realErrorMessage = error.error?.message || error.message || "Unknown Error";
+    
+    return new Response(JSON.stringify({ 
+      error: `[Server] ${realErrorMessage}` 
+    }), { 
       status: 500,
       headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
     });
