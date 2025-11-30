@@ -1,6 +1,5 @@
 import OpenAI from 'openai';
 
-// ✅ 必须是 SiliconFlow，否则 Qwen 和图片都无法使用！
 const client = new OpenAI({
   apiKey: process.env.DEEPSEEK_API_KEY, 
   baseURL: "https://api.siliconflow.cn/v1" 
@@ -12,7 +11,6 @@ export const config = {
 };
 
 export default async function handler(req) {
-  // 1. 跨域处理
   if (req.method === 'OPTIONS') {
     return new Response(null, {
       status: 200,
@@ -25,16 +23,67 @@ export default async function handler(req) {
   }
 
   try {
-    const { messages, model } = await req.json();
+    const { messages, model, useSearch } = await req.json();
+    let finalMessages = [...messages];
 
-    // 2. 修正模型名称 (防止前端传错)
-    // 如果用户选了 DeepSeek V3，确保发给后端的是 SiliconFlow 认可的 ID
-    let targetModel = model;
-    
-    // 3. 构建请求
+    // 🔥 核心逻辑：联网搜索
+    if (useSearch) {
+      // 1. 获取用户最新的问题
+      const userQuestion = messages[messages.length - 1].content;
+      
+      // 如果用户发的是复杂的对象(比如带图片的)，提取文字部分
+      let query = userQuestion;
+      if (Array.isArray(userQuestion)) {
+        query = userQuestion.find(item => item.type === 'text')?.text || "Describe this image";
+      }
+
+      console.log(`[Searching] Query: ${query}`);
+
+      // 2. 调用 Tavily 搜索 API
+      const tavilyResponse = await fetch("https://api.tavily.com/search", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          api_key: process.env.TAVILY_API_KEY, // 从 Vercel 环境变量获取
+          query: query,
+          search_depth: "basic",
+          include_answer: false,
+          max_results: 5
+        })
+      });
+
+      const searchData = await tavilyResponse.json();
+      
+      // 3. 将搜索结果整理成“上下文”
+      if (searchData.results && searchData.results.length > 0) {
+        const context = searchData.results.map(r => 
+          `Title: ${r.title}\nURL: ${r.url}\nContent: ${r.content}`
+        ).join("\n\n");
+
+        // 4. 把搜索结果“塞”给 AI (作为 System Prompt 或补充信息)
+        const searchContextMsg = {
+          role: "system",
+          content: `[Web Search Results]\nUse the following information to answer the user's question. If the answer is in the context, cite it.\n\n${context}`
+        };
+        
+        // 插在最新消息之前
+        finalMessages.splice(finalMessages.length - 1, 0, searchContextMsg);
+      }
+    }
+
+    // --- 防止视觉模型报错逻辑 ---
+    const hasImage = finalMessages.some(m => Array.isArray(m.content));
+    const isVisionModel = model.includes('VL');
+    if (hasImage && !isVisionModel) {
+      throw new Error(`Model Mismatch: You sent an image but selected "${model}". Please switch to "Qwen2 VL".`);
+    }
+
+    // --- 发送给 AI ---
     const response = await client.chat.completions.create({
-      model: targetModel,
-      messages: messages,
+      model: model || "deepseek-ai/DeepSeek-V3",
+      messages: finalMessages,
       stream: true,
       max_tokens: 4096,
     });
